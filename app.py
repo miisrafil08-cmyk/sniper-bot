@@ -111,10 +111,16 @@ def compute_10core_v9(past, ls_cnt):
     is_high_conf = (cf >= 86 and chaos <= 65 and agree >= 4 and ls_cnt <= 2)
     return {"sig": ch, "eng": b_nm, "conf": cf, "ema": ema, "chaos": chaos, "high": is_high_conf}
 
-# --- SHARED BACKGROUND STATE ---
+# --- SHARED BACKGROUND STATE & MANUAL QUEUE ---
 @st.cache_resource
 def start_background_services():
-    state = {"status": "🔄 Starting Cloud Browser..."}
+    state = {
+        "status": "🔄 Starting Cloud Browser...",
+        "phone": GAME_PHONE,
+        "password": GAME_PASS,
+        "force_login": True,
+        "action_queue": []
+    }
     lock = threading.Lock()
 
     def record_round(num, period_str):
@@ -188,6 +194,53 @@ def start_background_services():
             for item in obj:
                 extract_json_recursively(item, found_list)
 
+    # Human-like Manual/Auto Login Function (Skips +880 box accurately)
+    def perform_human_login(page, ph_raw, pw_raw):
+        if not ph_raw or not pw_raw or "এখানে" in pw_raw:
+            state["status"] = "⚠️ Password not set! Send /login PHONE PASS in Telegram"
+            return False
+
+        clean_ph = str(ph_raw).strip()
+        if clean_ph.startswith("+880"): clean_ph = clean_ph[4:]
+        elif clean_ph.startswith("880"): clean_ph = clean_ph[3:]
+        if clean_ph.startswith("0"): clean_ph = clean_ph[1:]
+
+        state["status"] = f"🔐 Typing login for {clean_ph}..."
+
+        # Target exact 'Please enter the phone number' box (skipping +880 dropdown)
+        ph_box = page.locator('input[placeholder*="enter the phone" i], input[placeholder*="phone number" i], input[name="userNumber"]')
+        if ph_box.count() == 0:
+            # Fallback: take the 2nd text/tel input on page (1st is +880)
+            all_inp = page.locator('input:not([type="password"]):not([type="checkbox"])')
+            ph_box = all_inp.nth(1) if all_inp.count() >= 2 else all_inp.first
+        else:
+            ph_box = ph_box.first
+
+        pw_box = page.locator('input[type="password"], input[placeholder*="Password" i]').first
+
+        if ph_box.count() > 0 and pw_box.count() > 0:
+            ph_box.click()
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            ph_box.press_sequentially(clean_ph, delay=60)
+            time.sleep(0.5)
+
+            pw_box.click()
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            pw_box.press_sequentially(str(pw_raw).strip(), delay=60)
+            time.sleep(1)
+
+            # Click Log in button
+            lg_btn = page.locator('button:has-text("Log in"), div:has-text("Log in")').first
+            lg_btn.click(force=True)
+            time.sleep(6)
+            page.goto(GAME_URL, timeout=60000)
+            time.sleep(4)
+            page.screenshot(path=SCREEN_PATH)
+            return True
+        return False
+
     def telegram_listener():
         offset = 0
         while True:
@@ -198,8 +251,32 @@ def start_background_services():
                     offset = item["update_id"] + 1
                     msg = item.get("message", {})
                     chat_id = msg.get("chat", {}).get("id")
-                    text = msg.get("text", "").strip().lower()
+                    text_raw = msg.get("text", "").strip()
+                    text = text_raw.lower()
                     if not chat_id: continue
+
+                    # Manual Login Command from Telegram: /login 1868505867 mypassword
+                    if text.startswith("/login"):
+                        parts = text_raw.split()
+                        if len(parts) >= 3:
+                            state["phone"] = parts[1]
+                            state["password"] = " ".join(parts[2:])
+                            state["force_login"] = True
+                            state["action_queue"].append({"type": "login", "chat_id": chat_id})
+                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                          json={"chat_id": chat_id, "text": "🔐 ম্যানুয়াল লগইন শুরু হয়েছে! ১০ সেকেন্ড পর অটোমেটিক স্ক্রিনশট আসছে..."})
+                        else:
+                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                          json={"chat_id": chat_id, "text": "⚠️ লগইন করতে এভাবে লিখুন:\n`/login 1868505867 আপনার_পাসওয়ার্ড`", "parse_mode": "Markdown"})
+                        continue
+
+                    # Manual Click Command from Telegram: /click Confirm
+                    if text.startswith("/click"):
+                        btn_name = text_raw[6:].strip() or "Confirm"
+                        state["action_queue"].append({"type": "click_text", "target": btn_name, "chat_id": chat_id})
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                      json={"chat_id": chat_id, "text": f"👆 `{btn_name}` বাটনে ক্লিক করা হচ্ছে..."})
+                        continue
 
                     raw_history, sheet_log = load_state()
                     w = sum(1 for r in sheet_log if r.get("Normal_Result") == "WIN")
@@ -219,7 +296,8 @@ def start_background_services():
                             f"💎 *শুধু হাই-কনফার্মেশন:* Win: {vw} | Loss: {vl} ({round(vw/max(1,vw+vl)*100)}%)\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
                             f"🎯 *পরবর্তী সিগন্যাল:* *{sig_txt}*\n\n"
-                            f"📥 শিট পেতে `/sheet` এবং লাইভ স্ক্রিন দেখতে `/screen` লিখুন।"
+                            f"🔐 ম্যানুয়ালি লগইন করতে:\n`/login 1868505867 পাসওয়ার্ড`\n"
+                            f"📥 শিট পেতে `/sheet` ও স্ক্রিন দেখতে `/screen` লিখুন।"
                         )
                         requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                                       json={"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
@@ -248,13 +326,23 @@ def start_background_services():
                 with sync_playwright() as p:
                     exec_path = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
                     if exec_path:
-                        browser = p.chromium.launch(executable_path=exec_path, headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                        browser = p.chromium.launch_persistent_context(
+                            user_data_dir="./cloud_session",
+                            executable_path=exec_path,
+                            headless=True,
+                            viewport={"width": 412, "height": 915},
+                            args=["--no-sandbox", "--disable-dev-shm-usage"]
+                        )
                     else:
                         os.system("playwright install chromium")
-                        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+                        browser = p.chromium.launch_persistent_context(
+                            user_data_dir="./cloud_session",
+                            headless=True,
+                            viewport={"width": 412, "height": 915},
+                            args=["--no-sandbox", "--disable-dev-shm-usage"]
+                        )
 
-                    context = browser.new_context(viewport={"width": 412, "height": 915})
-                    page = context.new_page()
+                    page = browser.pages[0] if browser.pages else browser.new_page()
 
                     def handle_response(response):
                         try:
@@ -274,31 +362,40 @@ def start_background_services():
                     time.sleep(5)
 
                     last_reload = time.time()
+                    last_login_try = 0
+
                     while True:
                         try:
-                            page.screenshot(path=SCREEN_PATH)
+                            # Process manual actions from Telegram or Web UI
+                            while state["action_queue"]:
+                                act = state["action_queue"].pop(0)
+                                if act["type"] == "login":
+                                    perform_human_login(page, state["phone"], state["password"])
+                                    if act.get("chat_id") and os.path.exists(SCREEN_PATH):
+                                        with open(SCREEN_PATH, "rb") as f:
+                                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                                                          data={"chat_id": act["chat_id"], "caption": f"✅ ম্যানুয়াল লগইন সম্পন্ন!\n{state['status']}"},
+                                                          files={"photo": f})
+                                elif act["type"] == "click_text":
+                                    t_btn = page.locator(f'text="{act["target"]}"').first
+                                    if t_btn.count() > 0:
+                                        t_btn.click(force=True)
+                                        time.sleep(3)
+                                        page.screenshot(path=SCREEN_PATH)
 
-                            if "login" in page.url.lower() or page.locator('input[type="password"]').count() > 0:
-                                state["status"] = "🔐 Logging into HGNICE..."
-                                clean_ph = GAME_PHONE.lstrip("0") if GAME_PHONE.startswith("01") else GAME_PHONE
-                                ph_inp = page.locator('input[placeholder*="phone" i], input[type="tel"], input[type="number"], input[type="text"]').first
-                                pw_inp = page.locator('input[type="password"]').first
-                                if ph_inp.count() > 0 and pw_inp.count() > 0:
-                                    ph_inp.fill(clean_ph)
-                                    pw_inp.fill(GAME_PASS)
-                                    time.sleep(1)
-                                    login_btn = page.locator('button:has-text("Log in"), div.login_btn, button').first
-                                    login_btn.click()
-                                    time.sleep(6)
-                                    page.goto(GAME_URL, timeout=60000)
-                                    time.sleep(4)
+                            # Auto-Login if on login screen (throttled to once every 25s)
+                            if ("login" in page.url.lower() or page.locator('input[type="password"]').count() > 0) and (time.time() - last_login_try > 25):
+                                last_login_try = time.time()
+                                perform_human_login(page, state["phone"], state["password"])
 
-                            for pop_text in ["Confirm", "OK", "Close", "I know"]:
+                            # Close Popups/Dialogs automatically
+                            for pop_text in ["Confirm", "OK", "Close", "I know", "Receive"]:
                                 pop_btn = page.locator(f'button:has-text("{pop_text}"), div.van-dialog__confirm:has-text("{pop_text}")')
                                 if pop_btn.count() > 0 and pop_btn.first.is_visible():
-                                    pop_btn.first.click()
+                                    pop_btn.first.click(force=True)
                                     time.sleep(1)
 
+                            # Scan Page Text for Period + Number
                             body_text = page.inner_text("body")
                             matches = re.findall(r'(202\d{9,16})\s+([0-9])\b', body_text)
                             if matches:
@@ -313,7 +410,7 @@ def start_background_services():
                                 last_reload = time.time()
 
                         except Exception as e:
-                            state["status"] = f"⚠️ Scanning ({str(e)[:20]})"
+                            state["status"] = f"⚠️ Scanning ({str(e)[:25]})"
                         time.sleep(3)
             except Exception as e:
                 state["status"] = f"🔄 Restarting ({str(e)[:20]})"
@@ -325,9 +422,19 @@ def start_background_services():
 
 bg_state = start_background_services()
 
-# --- STREAMLIT LIVE WEB DASHBOARD ---
+# --- STREAMLIT LIVE WEB DASHBOARD & MANUAL LOGIN PANEL ---
 st.title("⚖️ SIZE SNIPER V9 • 24/7 CLOUD")
 st.caption(f"📡 **Live Reader Status:** `{bg_state['status']}`")
+
+with st.expander("🔐 ম্যানুয়ালি লগইন করুন (Manual Login & Remote Control)", expanded=True):
+    col_p, col_w = st.columns(2)
+    in_phone = col_p.text_input("Phone Number (0 ছাড়া)", value=bg_state["phone"])
+    in_pass  = col_w.text_input("Password", value="" if "এখানে" in bg_state["password"] else bg_state["password"], type="password")
+    if st.button("🚀 ক্লাউড ব্রাউজারে এখনই ম্যানুয়াল লগইন করুন", use_container_width=True):
+        bg_state["phone"] = in_phone
+        bg_state["password"] = in_pass
+        bg_state["action_queue"].append({"type": "login"})
+        st.success("✅ লগইন কমান্ড পাঠানো হয়েছে! ১০ সেকেন্ড পর নিচে Refresh চাপুন অথবা টেলিগ্রামে /screen দিন।")
 
 raw_history, sheet_log = load_state()
 w = sum(1 for r in sheet_log if r.get("Normal_Result") == "WIN")
@@ -346,10 +453,14 @@ c4.metric("💎 VIP Win Rate", f"{round(vw/max(1,vw+vl)*100)}%")
 if nxt:
     st.success(f"🎯 **NEXT SIGNAL:** {'💎 HIGH CONF: ' if nxt['high'] else '⚡ Normal: '}**{nxt['sig']}** ({nxt['conf']}% | Step {nl+1}) — Engine: `{nxt['eng']}`")
 else:
-    st.warning(f"⌛ **ENGINE COLD ({len(raw_history)}/5 Data):** গেম থেকে প্রথম ৫টি রেজাল্ট রিড হওয়া পর্যন্ত অপেক্ষা করুন...")
+    st.warning(f"⌛ **ENGINE COLD ({len(raw_history)}/5 Data):** লগইন সম্পন্ন হলে প্রথম ৫টি রেজাল্ট অটো রিড হবে...")
 
-if st.button("🔄 Refresh Dashboard"):
+if st.button("🔄 Refresh Dashboard & Screen"):
     st.rerun()
+
+if os.path.exists(SCREEN_PATH):
+    st.subheader("🖥️ Live Cloud Browser Screen")
+    st.image(SCREEN_PATH, width=320)
 
 if os.path.exists(SHEET_CSV):
     with open(SHEET_CSV, "rb") as f:
@@ -358,7 +469,3 @@ if os.path.exists(SHEET_CSV):
 st.subheader("📊 Live Master Sheet (হাই-কনফার্মেশন কলামসহ)")
 if sheet_log:
     st.dataframe(pd.DataFrame(sheet_log), use_container_width=True)
-
-if os.path.exists(SCREEN_PATH):
-    with st.expander("🖥️ Live Cloud Browser Screen (গেমের বর্তমান স্ক্রিন)"):
-        st.image(SCREEN_PATH)
