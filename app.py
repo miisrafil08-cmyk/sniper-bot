@@ -4,24 +4,25 @@ import math
 import os
 import re
 import threading
+import subprocess
 import requests
 import pandas as pd
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 # ================= আপনার কনফিগারেশন =================
-BOT_TOKEN  = "9227687123:AAHKLiLKx3D2OMoLbv6JAB8vrVYI1xdqfHk"
-GAME_URL   = "https://hgnice.org/#/saasLottery/WinGo?gameType=WinGo_1M"
-GAME_PHONE = "1608505867"  # অথবা 1868505867 (টেলিগ্রামে /login দিয়েও যেকোনো সময় বদলাতে পারবেন)
-GAME_PASS  = "asdf4321"
+BOT_TOKEN = "9227687123:AAH7LBsqnameh8Nz_qU0lDznqeANVHWTbHs"
+HOME_URL  = "https://hgnice.org/#/login"
+WINGO_URL = "https://hgnice.org/#/saasLottery/WinGo?gameType=WinGo_1M"
 # ====================================================
 
 FILES = {
-    "30s": {"sheet": "Sniper_V10_30Sec_Sheet.csv", "raw": "Sniper_V10_30Sec_Raw.csv", "screen": "screen_30s.png"},
-    "1m":  {"sheet": "Sniper_V10_1Min_Sheet.csv",  "raw": "Sniper_V10_1Min_Raw.csv",  "screen": "screen_1m.png"}
+    "30s": {"sheet": "Sniper_V11_30Sec_Sheet.csv", "raw": "Sniper_V11_30Sec_Raw.csv"},
+    "1m":  {"sheet": "Sniper_V11_1Min_Sheet.csv",  "raw": "Sniper_V11_1Min_Raw.csv"}
 }
+LIVE_SCREEN = "manual_live_screen.png"
 
-st.set_page_config(page_title="SNIPER V10 DUAL (30s & 1m)", page_icon="⚖️", layout="centered")
+st.set_page_config(page_title="SNIPER V11 MANUAL & AUTO-READER", page_icon="⚖️", layout="centered")
 
 for mode in ["30s", "1m"]:
     if not os.path.exists(FILES[mode]["sheet"]):
@@ -47,7 +48,7 @@ def get_streaks(sheet_log):
         elif r.get("High_Conf_Result") == "WIN": break
     return norm_l, vip_l
 
-# --- 10-CORE V10 SUPREME ENGINE ---
+# --- 10-CORE V11 SUPREME ENGINE ---
 def compute_10core(past, ls_cnt):
     L = len(past)
     if L < 5: return None
@@ -130,26 +131,34 @@ def format_mode_report(mode_key, title_label):
         f"🎯 পরবর্তী সিগন্যাল: {sig_txt}"
     )
 
-# --- SINGLETON BACKGROUND ENGINE (NO DUPLICATE THREADS) ---
+# --- INTERACTIVE CLOUD BROWSER + START/STOP ENGINE ---
 @st.cache_resource
-def start_dual_engine():
+def init_interactive_system():
+    # Clean old zombie chromium processes
+    try:
+        subprocess.run(["pkill", "-f", "chromium"], stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     worker_id = str(int(time.time() * 1000))
-    with open("active_worker.lock", "w") as f:
+    with open("v11_worker.lock", "w") as f:
         f.write(worker_id)
 
     state = {
         "worker_id": worker_id,
-        "status_30s": "🔄 Starting 30s Reader...",
-        "status_1m":  "🔄 Starting 1m Reader...",
-        "phone": GAME_PHONE,
-        "password": GAME_PASS,
-        "action_queue": []
+        "is_reading": False,           # User controls Start/Stop manually!
+        "active_tab": "30s",           # Which mode is currently shown on screen
+        "both_modes_cycle": True,      # Automatically alternate 30s & 1m when reading is ON
+        "status": "⚪ Standby (গেমে ম্যানুয়ালি লগইন করে START বাটন চাপুন)",
+        "last_30s": "Waiting...",
+        "last_1m":  "Waiting...",
+        "cmd_queue": []
     }
     data_lock = threading.Lock()
 
-    def is_current_worker():
+    def is_alive():
         try:
-            with open("active_worker.lock", "r") as f:
+            with open("v11_worker.lock", "r") as f:
                 return f.read().strip() == state["worker_id"]
         except Exception:
             return True
@@ -208,7 +217,7 @@ def start_dual_engine():
             if len(raw_history) > 150: raw_history.pop(0)
             pd.DataFrame(raw_history).to_csv(FILES[mode]["raw"], index=False)
 
-            state[f"status_{mode}"] = f"🟢 {mode.upper()} Active | #{clean_p[-4:]} -> {num} ({act_size})"
+            state[f"last_{mode}"] = f"#{clean_p[-4:]} -> {num} ({act_size})"
             return True
 
     def extract_json_recursively(obj, found_list):
@@ -226,97 +235,9 @@ def start_dual_engine():
             for item in obj:
                 extract_json_recursively(item, found_list)
 
-    # Fixed Login: Uses Enter key + exact button click & waits for token without premature reload
-    def perform_human_login(page, ph_raw, pw_raw):
-        clean_ph = str(ph_raw).strip()
-        if clean_ph.startswith("+880"): clean_ph = clean_ph[4:]
-        elif clean_ph.startswith("880"): clean_ph = clean_ph[3:]
-        if clean_ph.startswith("0"): clean_ph = clean_ph[1:]
-
-        state["status_1m"] = f"🔐 Logging in ({clean_ph})..."
-
-        ph_box = page.locator('input[placeholder*="enter the phone" i], input[placeholder*="phone number" i], input[name="userNumber"]')
-        if ph_box.count() == 0:
-            all_inp = page.locator('input:not([type="password"]):not([type="checkbox"])')
-            ph_box = all_inp.nth(1) if all_inp.count() >= 2 else all_inp.first
-        else:
-            ph_box = ph_box.first
-
-        pw_box = page.locator('input[type="password"]').first
-
-        if ph_box.count() > 0 and pw_box.count() > 0:
-            ph_box.click(force=True)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            ph_box.press_sequentially(clean_ph, delay=50)
-            time.sleep(0.4)
-
-            pw_box.click(force=True)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            pw_box.press_sequentially(str(pw_raw).strip(), delay=50)
-            time.sleep(0.6)
-
-            # Click exact button tag OR press Enter
-            btn = page.locator('button:has-text("Log in")')
-            if btn.count() > 0:
-                btn.first.click(force=True)
-            else:
-                page.keyboard.press("Enter")
-
-            # Wait up to 8 seconds for login page to disappear naturally (DO NOT force goto immediately!)
-            for _ in range(8):
-                time.sleep(1)
-                if page.locator('input[type="password"]').count() == 0:
-                    break
-
-            # Close any welcome popups
-            for pop_text in ["Confirm", "OK", "Close", "I know", "Receive"]:
-                pop_btn = page.locator(f'button:has-text("{pop_text}"), div.van-dialog__confirm:has-text("{pop_text}")')
-                if pop_btn.count() > 0 and pop_btn.first.is_visible():
-                    pop_btn.first.click(force=True)
-                    time.sleep(0.5)
-
-            page.screenshot(path=FILES["1m"]["screen"])
-            return page.locator('input[type="password"]').count() == 0
-        return False
-
-    def switch_tab_mode(page, target_mode):
-        try:
-            # Close popups first
-            for pop_text in ["Confirm", "OK", "Close", "I know", "Receive"]:
-                pop_btn = page.locator(f'button:has-text("{pop_text}"), div.van-dialog__confirm:has-text("{pop_text}")')
-                if pop_btn.count() > 0 and pop_btn.first.is_visible():
-                    pop_btn.first.click(force=True)
-                    time.sleep(0.5)
-
-            # If on home lobby, click WinGo
-            if "wingo" not in page.url.lower():
-                wg = page.locator('text=/WinGo/i')
-                if wg.count() > 0:
-                    wg.first.click(force=True)
-                    time.sleep(3)
-                else:
-                    page.goto(GAME_URL, timeout=45000)
-                    time.sleep(4)
-
-            # Click 30sec or 1Min tab inside WinGo page
-            if target_mode == "30s":
-                tab = page.locator('div:has-text("WinGo 30sec"), span:has-text("30sec"), div:has-text("30s")')
-                if tab.count() > 0:
-                    tab.last.click(force=True)
-                    time.sleep(2)
-            else:
-                tab = page.locator('div:has-text("WinGo 1Min"), div:has-text("WinGo 1 Min"), span:has-text("1Min")')
-                if tab.count() > 0:
-                    tab.last.click(force=True)
-                    time.sleep(2)
-        except Exception:
-            pass
-
     def telegram_listener():
         offset = 0
-        while is_current_worker():
+        while is_alive():
             try:
                 url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=20"
                 res = requests.get(url, timeout=25).json()
@@ -324,234 +245,293 @@ def start_dual_engine():
                     offset = item["update_id"] + 1
                     msg = item.get("message", {})
                     chat_id = msg.get("chat", {}).get("id")
-                    text_raw = msg.get("text", "").strip()
-                    text = text_raw.lower()
+                    text = msg.get("text", "").strip().lower()
                     if not chat_id: continue
 
-                    if text.startswith("/login"):
-                        parts = text_raw.split()
-                        if len(parts) >= 3:
-                            state["phone"] = parts[1]
-                            state["password"] = " ".join(parts[2:])
-                            state["action_queue"].append({"type": "login", "chat_id": chat_id})
-                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                          json={"chat_id": chat_id, "text": "🔐 লগইন ও Dual-Tab (30s + 1m) সেটআপ শুরু হয়েছে! ১২ সেকেন্ড পর স্ক্রিনশট আসছে..."})
-                        else:
-                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                          json={"chat_id": chat_id, "text": "⚠️ এভাবে লিখুন:\n`/login 1608505867 asdf4321`", "parse_mode": "Markdown"})
+                    if text in ["/run", "/start_read"]:
+                        state["is_reading"] = True
+                        state["status"] = "🟢 AUTO-READING RUNNING (30s & 1m)"
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                      json={"chat_id": chat_id, "text": "🟢 অটো-রিডিং চালু করা হয়েছে!"})
+                        continue
+
+                    if text in ["/stop", "/stop_read"]:
+                        state["is_reading"] = False
+                        state["status"] = "🛑 AUTO-READING STOPPED"
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                      json={"chat_id": chat_id, "text": "🛑 অটো-রিডিং বন্ধ করা হয়েছে।"})
                         continue
 
                     if text in ["/30s", "30s", "/status30"]:
-                        rep = (
-                            f"⚖️ *SNIPER V10 • 30 SEC MODE*\n"
-                            f"📡 `{state['status_30s']}`\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"{format_mode_report('30s', 'WinGo 30Sec Live')}\n\n"
-                            f"📥 শিট পেতে `/sheet30` লিখুন।"
-                        )
-                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                      json={"chat_id": chat_id, "text": rep, "parse_mode": "Markdown"})
+                        rep = f"⚖️ *SNIPER V11 (30 SEC)*\n📡 `{state['status']}`\nLast: `{state['last_30s']}`\n━━━━━━━━━━━━━━\n{format_mode_report('30s', 'WinGo 30Sec')}"
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": rep, "parse_mode": "Markdown"})
 
                     elif text in ["/1m", "1m", "/status1m"]:
-                        rep = (
-                            f"⚖️ *SNIPER V10 • 1 MIN MODE*\n"
-                            f"📡 `{state['status_1m']}`\n"
-                            f"━━━━━━━━━━━━━━━━━━\n"
-                            f"{format_mode_report('1m', 'WinGo 1Min Live')}\n\n"
-                            f"📥 শিট পেতে `/sheet1m` লিখুন।"
-                        )
-                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                      json={"chat_id": chat_id, "text": rep, "parse_mode": "Markdown"})
+                        rep = f"⚖️ *SNIPER V11 (1 MIN)*\n📡 `{state['status']}`\nLast: `{state['last_1m']}`\n━━━━━━━━━━━━━━\n{format_mode_report('1m', 'WinGo 1Min')}"
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": rep, "parse_mode": "Markdown"})
 
                     elif text in ["/start", "/status", "status"]:
                         rep = (
-                            f"⚖️ *SNIPER V10 DUAL CLOUD (30s & 1m)*\n"
-                            f"📡 30s: `{state['status_30s']}`\n"
-                            f"📡 1m: `{state['status_1m']}`\n"
+                            f"⚖️ *SNIPER V11 CONTROLLER*\n"
+                            f"📡 `{state['status']}`\n"
+                            f"⏱️ 30s Last: `{state['last_30s']}` | 1m Last: `{state['last_1m']}`\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
                             f"{format_mode_report('30s', 'WinGo 30Sec (৩০ সেকেন্ড)')}\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
                             f"{format_mode_report('1m', 'WinGo 1Min (১ মিনিট)')}\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
-                            f"📌 *কমান্ড সমূহ:*\n"
-                            f"• `/30s` বা `/1m` — আলাদা সিগন্যাল দেখতে\n"
-                            f"• `/sheet30` বা `/sheet1m` — আলাদা এক্সেল শিট পেতে\n"
-                            f"• `/screen` — লাইভ ব্রাউজার স্ক্রিন দেখতে"
+                            f"• `/30s` বা `/1m` — আলাদা সিগন্যাল\n"
+                            f"• `/sheet30` বা `/sheet1m` — আলাদা শিট\n"
+                            f"• `/run` বা `/stop` — রিডিং চালু/বন্ধ\n"
+                            f"• `/screen` — বর্তমান স্ক্রিনশট"
                         )
-                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                      json={"chat_id": chat_id, "text": rep, "parse_mode": "Markdown"})
+                        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": rep, "parse_mode": "Markdown"})
 
                     elif text in ["/sheet30", "sheet30"]:
                         with open(FILES["30s"]["sheet"], "rb") as f:
-                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                                          data={"chat_id": chat_id, "caption": "📊 WinGo 30Sec Master Sheet (💎 VIP কলামসহ)"},
-                                          files={"document": f})
+                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument", data={"chat_id": chat_id, "caption": "📊 WinGo 30Sec Sheet"}, files={"document": f})
 
                     elif text in ["/sheet1m", "sheet1m", "/sheet", "sheet"]:
                         with open(FILES["1m"]["sheet"], "rb") as f:
-                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                                          data={"chat_id": chat_id, "caption": "📊 WinGo 1Min Master Sheet (💎 VIP কলামসহ)"},
-                                          files={"document": f})
+                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument", data={"chat_id": chat_id, "caption": "📊 WinGo 1Min Sheet"}, files={"document": f})
                         if text in ["/sheet", "sheet"]:
                             with open(FILES["30s"]["sheet"], "rb") as f2:
-                                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
-                                              data={"chat_id": chat_id, "caption": "📊 WinGo 30Sec Master Sheet (💎 VIP কলামসহ)"},
-                                              files={"document": f2})
+                                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument", data={"chat_id": chat_id, "caption": "📊 WinGo 30Sec Sheet"}, files={"document": f2})
 
                     elif text in ["/screen", "screen"]:
-                        sent_any = False
-                        for m_key, m_label in [("30s", "WinGo 30Sec Tab"), ("1m", "WinGo 1Min Tab")]:
-                            sc_file = FILES[m_key]["screen"]
-                            if os.path.exists(sc_file):
-                                sent_any = True
-                                with open(sc_file, "rb") as f:
-                                    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                                                  data={"chat_id": chat_id, "caption": f"🖥️ {m_label}\n{state['status_' + m_key]}"},
-                                                  files={"photo": f})
-                        if not sent_any:
-                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                          json={"chat_id": chat_id, "text": "⌛ ব্রাউজার লোড হচ্ছে, ১০ সেকেন্ড পর আবার `/screen` দিন।"})
+                        if os.path.exists(LIVE_SCREEN):
+                            with open(LIVE_SCREEN, "rb") as f:
+                                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data={"chat_id": chat_id, "caption": f"🖥️ V11 Live Screen\n{state['status']}"}, files={"photo": f})
             except Exception:
                 time.sleep(3)
 
-    def auto_reader_worker():
-        while is_current_worker():
+    def browser_worker():
+        while is_alive():
             try:
                 with sync_playwright() as p:
                     exec_path = "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
-                    launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
+                    args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
                     if exec_path:
-                        browser = p.chromium.launch_persistent_context(
-                            user_data_dir="./dual_session_v10",
-                            executable_path=exec_path,
-                            headless=True,
-                            viewport={"width": 412, "height": 915},
-                            args=launch_args
-                        )
+                        browser = p.chromium.launch_persistent_context(user_data_dir="./v11_manual_session", executable_path=exec_path, headless=True, viewport={"width": 412, "height": 880}, args=args)
                     else:
                         os.system("playwright install chromium")
-                        browser = p.chromium.launch_persistent_context(
-                            user_data_dir="./dual_session_v10",
-                            headless=True,
-                            viewport={"width": 412, "height": 915},
-                            args=launch_args
-                        )
+                        browser = p.chromium.launch_persistent_context(user_data_dir="./v11_manual_session", headless=True, viewport={"width": 412, "height": 880}, args=args)
 
-                    # Create two dedicated tabs: page_1m and page_30s
-                    page_1m = browser.pages[0] if browser.pages else browser.new_page()
-                    page_30s = browser.new_page()
+                    page = browser.pages[0] if browser.pages else browser.new_page()
 
-                    def attach_json_listener(page_obj, mode_str):
-                        def handle_resp(response):
-                            try:
-                                if "json" in response.headers.get("content-type", "").lower():
-                                    data = response.json()
-                                    found = []
-                                    extract_json_recursively(data, found)
-                                    if found:
-                                        found.sort(key=lambda x: x[0])
-                                        for per_id, digit in found:
-                                            record_round(mode_str, digit, per_id)
-                            except Exception:
-                                pass
-                        page_obj.on("response", handle_resp)
-
-                    attach_json_listener(page_1m, "1m")
-                    attach_json_listener(page_30s, "30s")
-
-                    page_1m.goto(GAME_URL, timeout=60000)
-                    time.sleep(5)
-
-                    # Initial login check on Tab 1
-                    if "login" in page_1m.url.lower() or page_1m.locator('input[type="password"]').count() > 0:
-                        perform_human_login(page_1m, state["phone"], state["password"])
-
-                    # Setup Tab 1 as 1Min & Tab 2 as 30Sec
-                    switch_tab_mode(page_1m, "1m")
-                    page_30s.goto(GAME_URL, timeout=60000)
-                    time.sleep(4)
-                    switch_tab_mode(page_30s, "30s")
-
-                    last_tab_sync = time.time()
-
-                    while is_current_worker():
+                    # Intercept JSON responses ONLY when user has turned Reading ON
+                    def on_response(response):
+                        if not state["is_reading"]:
+                            return
                         try:
-                            # Process Manual Login Queue
-                            while state["action_queue"]:
-                                act = state["action_queue"].pop(0)
-                                if act["type"] == "login":
-                                    page_1m.goto("https://hgnice.org/#/login", timeout=45000)
-                                    time.sleep(3)
-                                    ok = perform_human_login(page_1m, state["phone"], state["password"])
-                                    switch_tab_mode(page_1m, "1m")
-                                    page_30s.goto(GAME_URL, timeout=45000)
-                                    time.sleep(3)
-                                    switch_tab_mode(page_30s, "30s")
-                                    page_1m.screenshot(path=FILES["1m"]["screen"])
-                                    page_30s.screenshot(path=FILES["30s"]["screen"])
-                                    if act.get("chat_id"):
-                                        msg_txt = "✅ লগইন সফল! 30s ও 1m দুটি ট্যাবই চালু হয়েছে।" if ok else "⚠️ লগইন পেজ এখনো আছে, নাম্বার/পাসওয়ার্ড চেক করুন।"
-                                        with open(FILES["1m"]["screen"], "rb") as f:
-                                            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                                                          data={"chat_id": act["chat_id"], "caption": msg_txt},
-                                                          files={"photo": f})
+                            if "json" in response.headers.get("content-type", "").lower():
+                                data = response.json()
+                                found = []
+                                extract_json_recursively(data, found)
+                                if found:
+                                    found.sort(key=lambda x: x[0])
+                                    for per_id, digit in found:
+                                        # Route by period format or active tab
+                                        mode_target = state["active_tab"]
+                                        record_round(mode_target, digit, per_id)
+                        except Exception:
+                            pass
 
-                            # Scan both pages every 2.5 seconds
-                            for m_key, pg in [("30s", page_30s), ("1m", page_1m)]:
-                                if "login" in pg.url.lower() or pg.locator('input[type="password"]').count() > 0:
-                                    state[f"status_{m_key}"] = "🔐 Needs Login (/login PHONE PASS)"
-                                    perform_human_login(pg, state["phone"], state["password"])
-                                    switch_tab_mode(pg, m_key)
+                    page.on("response", on_response)
+                    page.goto(HOME_URL, timeout=60000)
+                    time.sleep(3)
+                    page.screenshot(path=LIVE_SCREEN)
 
-                                body_txt = pg.inner_text("body")
+                    last_cycle_switch = time.time()
+
+                    while is_alive():
+                        try:
+                            # 1. Execute User's Manual Remote Control Commands from Streamlit UI
+                            while state["cmd_queue"]:
+                                cmd = state["cmd_queue"].pop(0)
+                                ctype = cmd.get("type")
+
+                                if ctype == "fill_login":
+                                    ph = str(cmd["phone"]).strip().lstrip("0")
+                                    pw = str(cmd["pass"]).strip()
+                                    # Fill phone & password boxes accurately
+                                    inps = page.locator('input:not([type="password"]):not([type="checkbox"])')
+                                    ph_box = inps.nth(1) if inps.count() >= 2 else inps.first
+                                    pw_box = page.locator('input[type="password"]').first
+                                    if ph_box.count() > 0 and pw_box.count() > 0:
+                                        ph_box.click(force=True)
+                                        page.keyboard.press("Control+A")
+                                        page.keyboard.press("Backspace")
+                                        ph_box.press_sequentially(ph, delay=50)
+                                        time.sleep(0.3)
+                                        pw_box.click(force=True)
+                                        page.keyboard.press("Control+A")
+                                        page.keyboard.press("Backspace")
+                                        pw_box.press_sequentially(pw, delay=50)
+                                        time.sleep(0.5)
+                                        # Click Red Log in Button at center coordinates or via button locator
+                                        lg_btn = page.locator('button:has-text("Log in"), div.login-btn, .van-button--danger')
+                                        if lg_btn.count() > 0:
+                                            lg_btn.first.click(force=True)
+                                        else:
+                                            page.mouse.click(206, 515)
+                                        time.sleep(5)
+
+                                elif ctype == "click_confirm":
+                                    for t in ["Confirm", "OK", "Close", "I know", "Receive"]:
+                                        b = page.locator(f'button:has-text("{t}"), div.van-dialog__confirm, text="{t}"')
+                                        if b.count() > 0:
+                                            try:
+                                                b.first.click(force=True)
+                                                time.sleep(1)
+                                            except Exception:
+                                                pass
+
+                                elif ctype == "goto_wingo":
+                                    wg = page.locator('text=/Win\\s*Go/i')
+                                    if wg.count() > 0:
+                                        wg.first.click(force=True)
+                                        time.sleep(4)
+                                    else:
+                                        page.goto(WINGO_URL, timeout=45000)
+                                        time.sleep(4)
+
+                                elif ctype == "switch_mode":
+                                    m = cmd["mode"]
+                                    state["active_tab"] = m
+                                    if m == "30s":
+                                        t30 = page.locator('text=/30\\s*sec/i')
+                                        if t30.count() > 0: t30.first.click(force=True)
+                                    else:
+                                        t1m = page.locator('text=/1\\s*Min/i')
+                                        if t1m.count() > 0: t1m.first.click(force=True)
+                                    time.sleep(2)
+
+                                elif ctype == "xy_click":
+                                    page.mouse.click(int(cmd["x"]), int(cmd["y"]))
+                                    time.sleep(2)
+
+                                elif ctype == "goto_url":
+                                    page.goto(cmd["url"], timeout=45000)
+                                    time.sleep(3)
+
+                                page.screenshot(path=LIVE_SCREEN)
+
+                            # 2. If user clicked START READING, scan history table & cycle 30s/1m
+                            if state["is_reading"]:
+                                body_txt = page.inner_text("body")
                                 matches = re.findall(r'(202\d{9,16})\s+([0-9])\b', body_txt)
                                 if matches:
                                     matches.sort(key=lambda x: x[0])
                                     for per_id, digit in matches:
-                                        record_round(m_key, int(digit), per_id)
+                                        record_round(state["active_tab"], int(digit), per_id)
 
-                                pg.screenshot(path=FILES[m_key]["screen"])
+                                # Auto-switch between 30s and 1m every 8 seconds if Dual Mode is enabled
+                                if state["both_modes_cycle"] and (time.time() - last_cycle_switch > 8):
+                                    next_m = "1m" if state["active_tab"] == "30s" else "30s"
+                                    state["active_tab"] = next_m
+                                    if next_m == "30s":
+                                        t30 = page.locator('text=/30\\s*sec/i')
+                                        if t30.count() > 0: t30.first.click(force=True)
+                                    else:
+                                        t1m = page.locator('text=/1\\s*Min/i')
+                                        if t1m.count() > 0: t1m.first.click(force=True)
+                                    last_cycle_switch = time.time()
+                                    time.sleep(1.5)
 
-                            # Re-verify tabs every 5 minutes
-                            if time.time() - last_tab_sync > 300:
-                                switch_tab_mode(page_1m, "1m")
-                                switch_tab_mode(page_30s, "30s")
-                                last_tab_sync = time.time()
-
-                        except Exception as e:
-                            state["status_1m"] = f"⚠️ Scanning ({str(e)[:18]})"
-                        time.sleep(2.5)
+                            page.screenshot(path=LIVE_SCREEN)
+                        except Exception:
+                            pass
+                        time.sleep(2)
             except Exception as e:
-                state["status_1m"] = f"🔄 Restarting ({str(e)[:18]})"
-                time.sleep(5)
+                state["status"] = f"🔄 Browser Restarting ({str(e)[:20]})"
+                time.sleep(4)
 
     threading.Thread(target=telegram_listener, daemon=True).start()
-    threading.Thread(target=auto_reader_worker, daemon=True).start()
+    threading.Thread(target=browser_worker, daemon=True).start()
     return state
 
-bg_state = start_dual_engine()
+sys_state = init_interactive_system()
 
-# --- STREAMLIT DUAL DASHBOARD UI ---
-st.title("⚖️ SIZE SNIPER V10 • DUAL (30s & 1m)")
+# ================= STREAMLIT UI (MANUAL BROWSER + START/STOP) =================
+st.title("⚖️ SIZE SNIPER V11 • MANUAL LOGIN & READER")
+st.info(f"📡 **বর্তমান স্ট্যাটাস:** `{sys_state['status']}`  |  **30s Last:** `{sys_state['last_30s']}`  |  **1m Last:** `{sys_state['last_1m']}`")
 
-with st.expander("🔐 ম্যানুয়াল লগইন (Manual Login Control)", expanded=False):
-    cp, cw = st.columns(2)
-    in_ph = cp.text_input("Phone (0 ছাড়া)", value=bg_state["phone"])
-    in_pw = cw.text_input("Password", value=bg_state["password"], type="password")
-    if st.button("🚀 Login & Sync Both Modes (30s + 1m)", use_container_width=True):
-        bg_state["phone"] = in_ph
-        bg_state["password"] = in_pw
-        bg_state["action_queue"].append({"type": "login"})
-        st.success("✅ লগইন কমান্ড পাঠানো হয়েছে! ১২ সেকেন্ড পর Refresh চাপুন।")
-
-if st.button("🔄 Refresh Live Data", use_container_width=True):
+# --- STEP 1: START / STOP MASTER BUTTONS ---
+col_run, col_stop, col_ref = st.columns(3)
+if col_run.button("🟢 START AUTO-READING", use_container_width=True, type="primary"):
+    sys_state["is_reading"] = True
+    sys_state["status"] = "🟢 AUTO-READING RUNNING (30s & 1m)"
     st.rerun()
 
-tab_30s, tab_1m = st.tabs(["⚡ WinGo 30Sec Mode", "⏱️ WinGo 1Min Mode"])
+if col_stop.button("🛑 STOP READING", use_container_width=True):
+    sys_state["is_reading"] = False
+    sys_state["status"] = "🛑 STOPPED BY USER (Standby)"
+    st.rerun()
+
+if col_ref.button("🔄 স্ক্রিন রিফ্রেশ করুন", use_container_width=True):
+    st.rerun()
+
+sys_state["both_modes_cycle"] = st.checkbox("🔄 ৩o সেকেন্ড (30s) এবং ১ মিনিট (1m) দুটি মোডই একসাথে অটো-রিড করুন", value=sys_state["both_modes_cycle"])
+
+# --- STEP 2: LIVE INTERACTIVE BROWSER SCREEN & MANUAL CONTROLS ---
+st.subheader("🖥️ ১. ক্লাউড ব্রাউজার (নিজে লগইন করে WinGo পেজে যান)")
+
+c_left, c_right = st.columns([1.15, 1])
+
+with c_left:
+    if os.path.exists(LIVE_SCREEN):
+        st.image(LIVE_SCREEN, caption=f"Live Browser Screen (Active Tab: {sys_state['active_tab']})", use_container_width=True)
+    else:
+        st.warning("⌛ ব্রাউজার ওপেন হচ্ছে... ৩ সেকেন্ড পর 'স্ক্রিন রিফ্রেশ করুন' চাপুন।")
+
+with c_right:
+    st.markdown("**🔐 ধাপ ক: লগইন করুন**")
+    m_ph = st.text_input("Phone (0 ছাড়া, যেমন 1787612580)", value="1787612580")
+    m_pw = st.text_input("Password", value="mdisrafil12345", type="password")
+    if st.button("🔑 ১. নাম্বার ও পাসওয়ার্ড বসিয়ে Log in চাপুন", use_container_width=True):
+        sys_state["cmd_queue"].append({"type": "fill_login", "phone": m_ph, "pass": m_pw})
+        time.sleep(6)
+        st.rerun()
+
+    st.markdown("**👆 ধাপ খ: পপ-আপ কাটুন ও WinGo-তে যান**")
+    if st.button("✅ ২. Confirm / পপ-আপ কাটুন (৩ বার চাপুন)", use_container_width=True):
+        sys_state["cmd_queue"].append({"type": "click_confirm"})
+        time.sleep(2)
+        st.rerun()
+
+    if st.button("🎯 ৩. WinGo গেমের ভেতরে ঢুকুন", use_container_width=True):
+        sys_state["cmd_queue"].append({"type": "goto_wingo"})
+        time.sleep(4)
+        st.rerun()
+
+    b30, b1m = st.columns(2)
+    if b30.button("⚡ WinGo 30s ট্যাব", use_container_width=True):
+        sys_state["cmd_queue"].append({"type": "switch_mode", "mode": "30s"})
+        time.sleep(2.5)
+        st.rerun()
+    if b1m.button("⏱️ WinGo 1Min ট্যাব", use_container_width=True):
+        sys_state["cmd_queue"].append({"type": "switch_mode", "mode": "1m"})
+        time.sleep(2.5)
+        st.rerun()
+
+    with st.expander("🖱️ কাস্টম ক্লিক (স্ক্রিনের যেকোনো জায়গায় ক্লিক করতে)"):
+        cx, cy = st.columns(2)
+        x_val = cx.number_input("X (0-412)", value=206, min_value=0, max_value=412)
+        y_val = cy.number_input("Y (0-880)", value=550, min_value=0, max_value=880)
+        if st.button("👆 এই পজিশনে ক্লিক করুন", use_container_width=True):
+            sys_state["cmd_queue"].append({"type": "xy_click", "x": x_val, "y": y_val})
+            time.sleep(2.5)
+            st.rerun()
+
+st.markdown("---")
+
+# --- STEP 3: LIVE SIGNALS & SHEETS FOR 30S AND 1M ---
+st.subheader("📊 ২. লাইভ সিগন্যাল ও স্থায়ী শিট (30s & 1m)")
+tab_30s, tab_1m = st.tabs(["⚡ WinGo 30Sec ডাটা ও শিট", "⏱️ WinGo 1Min ডাটা ও শিট"])
 
 for mode_key, tab_obj, label in [("30s", tab_30s, "WinGo 30Sec"), ("1m", tab_1m, "WinGo 1Min")]:
     with tab_obj:
-        st.caption(f"📡 **Status:** `{bg_state['status_' + mode_key]}`")
         raw, sheet = load_mode_data(mode_key)
         w = sum(1 for r in sheet if r.get("Normal_Result") == "WIN")
         l = sum(1 for r in sheet if r.get("Normal_Result") == "LOSS")
@@ -567,9 +547,9 @@ for mode_key, tab_obj, label in [("30s", tab_30s, "WinGo 30Sec"), ("1m", tab_1m,
         c4.metric("💎 VIP Rate", f"{round(vw/max(1,vw+vl)*100)}%")
 
         if nxt:
-            st.success(f"🎯 **{label} NEXT SIGNAL:** {'💎 HIGH CONF: ' if nxt['high'] else '⚡ Normal: '}**{nxt['sig']}** ({nxt['conf']}% | Step {nl+1})")
+            st.success(f"🎯 **{label} NEXT SIGNAL:** {'💎 HIGH CONF: ' if nxt['high'] else '⚡ Normal: '}**{nxt['sig']}** ({nxt['conf']}% | Step {nl+1}) — Engine: `{nxt['eng']}`")
         else:
-            st.warning(f"⌛ **COLD ({len(raw)}/5 Data):** ডেটা রিড হচ্ছে...")
+            st.warning(f"⌛ **COLD ({len(raw)}/5 Data):** রিডিং চালু করলে ৫টি ডাটা জমা হলেই সিগন্যাল শুরু হবে।")
 
         if os.path.exists(FILES[mode_key]["sheet"]):
             with open(FILES[mode_key]["sheet"], "rb") as f:
@@ -577,6 +557,3 @@ for mode_key, tab_obj, label in [("30s", tab_30s, "WinGo 30Sec"), ("1m", tab_1m,
 
         if sheet:
             st.dataframe(pd.DataFrame(sheet), use_container_width=True)
-
-        if os.path.exists(FILES[mode_key]["screen"]):
-            st.image(FILES[mode_key]["screen"], caption=f"{label} Live Screen", width=300)
