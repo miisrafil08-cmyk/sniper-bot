@@ -11,7 +11,7 @@ from playwright.sync_api import sync_playwright
 
 # ================= আপনার কনফিগারেশন =================
 BOT_TOKEN  = "9227687123:AAHKLiLKx3D20MoLbv6JAB8vrVYI1xdqfHk"
-GAME_URL   = "https://hgnice.org/#/saasLottery/WinGo?gameType=WinGo_30S"
+GAME_URL   = "https://hgnice.org/#/saasLottery/WinGo?gameType=WinGo_1M"
 GAME_PHONE = "1608505867"
 GAME_PASS  = "asdf4321"
 # ====================================================
