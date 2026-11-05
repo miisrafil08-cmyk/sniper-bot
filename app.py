@@ -11,7 +11,7 @@ from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 # ================= আপনার কনফিগারেশন =================
-BOT_TOKEN    = "9227687123:AAHKLiLKx3D2OMoLbv6JAB8vrVYI1xdqfHk"
+BOT_TOKEN    = "9227687123:AAH7LBsqnameh8Nz_qU0lDznqeANVHWTbHs"
 LOGIN_URL    = "https://hgnice.org/#/login"
 HOME_URL     = "https://hgnice.org/#/"
 DEFAULT_PH   = "1787612580"
